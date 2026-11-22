@@ -30,6 +30,7 @@ from brain.aim import lead, mortar_pitch, wrap, yaw_pitch
 from brain.crossfire import Crossfire
 from brain.nav import NavField, NavGrid
 from brain.world import World
+from brain.route_probe import RouteProbe
 
 # Practice-squad variant of the document's weight table (sum of magnitudes = 100 per phase).
 PHASE_W = {
@@ -242,6 +243,7 @@ class Agent:
         self.flip = 1.0
         self.flip_t = 0.0
         self.loot_mem: Dict[int, Tuple[str, Tuple[float, float, float], float]] = {}
+        self.route_probe = RouteProbe.from_env()
         self.commit_dir: Optional[Tuple[float, float]] = None
         self.commit_until = -1.0
         self.crossfire = Crossfire(self.cfg)
@@ -292,6 +294,8 @@ class Agent:
                  aim=[round(aim[0], 4), round(aim[1], 4)], fire=fire)
         if self.crossfire.sample is not None and os.environ.get("MECH_LOCAL_METRICS") == "1":
             a["debug"] = {"crossfire": self.crossfire.sample}
+        if self.route_probe and self.route_probe.applied:
+            a.setdefault("debug", {})["route_w"] = self.route_probe.applied
         return a
 
     def movement_budget(self, move, boost, jump, locks, incoming):
@@ -784,6 +788,14 @@ class Agent:
             self.update_cover([th for th in srcs if th.conf >= 0.5][:2])
 
         self.grab_pt = None
+        route = self.route_probe
+        blocked_pickup = None
+        if route is not None:
+            route_kinds = [w["kind"] if w else None for w in me["weapons"]]
+            route.observe(obs, self.weapon_pref(route_kinds).keys() - set(route_kinds))
+            if route.item and route.mode == "abandon":
+                blocked_pickup = route.pickup
+                route.applied = "abandon"
         if P["grab"]:
             kinds0 = [w["kind"] if w else None for w in me["weapons"]]
             pref0 = self.weapon_pref(kinds0)
@@ -792,6 +804,8 @@ class Agent:
             if pref0 and not busy:
                 best_g = None
                 for pk in obs.get("pickups", []):
+                    if pk["id"] == blocked_pickup:
+                        continue
                     if pk["kind"] in kinds0 or pk["kind"] not in pref0 or abs(pk["pos"][2] - z) > 3.5:
                         continue
                     dg = math.dist(pk["pos"][:2], (x, y))
@@ -1029,7 +1043,7 @@ class Agent:
 
         # ---------------------------------------------------------- f_loot
         f_loot = np.zeros(n)
-        objs = self.loot_objects(obs, kinds)
+        objs = self.loot_objects(obs, kinds, blocked_pickup)
         if objs:
             O = np.array([(o[0], o[1]) for o in objs])
             oc, _ = self.f_cross_at(O[:, 0], O[:, 1], srcs, None)
@@ -1069,6 +1083,21 @@ class Agent:
         if committed and P["w_commit"] > 0:
             U = U + P["w_commit"] * np.clip(ux * self.commit_dir[0] + uy * self.commit_dir[1], 0.0, 1.0)
         U[veto] = -1_000_000.0
+        if route and route.item and route.mode != "abandon" and me["grounded"] and not on_roof:
+            px, py, pz = route.item["pos"]
+            remaining = math.hypot(px - x, py - y)
+            if (remaining >= 0.3 and abs(pz - z) <= 3.5
+                    and self.nav.clear_line(x, y, px, py)):
+                progress = remaining - np.hypot(X - px, Y - py)
+                legal = (progress > 0.25) & ~veto
+                if legal.any():
+                    lead = int(np.argmax(np.where(legal, progress, -1.0)))
+                    base = int(np.argmax(U))
+                    if route.mode == "continue" or route.consider(
+                        self, obs, remaining, float(f_cross[lead] - f_cross[base]), float(f_aoe[lead])
+                    ):
+                        U[legal] += 22.0 * np.clip(progress[legal] / min(12.0, remaining), 0.0, 1.0)
+                        route.applied = route.mode
 
         best = int(np.argmax(U))
         if time.perf_counter() < self.deadline:
@@ -1127,7 +1156,7 @@ class Agent:
             return {"lightning": 0.9, "laser": 0.9}
         return {}
 
-    def loot_objects(self, obs: dict, kinds) -> List[Tuple[float, float, float]]:
+    def loot_objects(self, obs: dict, kinds, excluded_pickup=None) -> List[Tuple[float, float, float]]:
         """O_t with need(o, inventory, cubes, h) in [0, 1]: (a) a weapon for the empty slot,
         (b) cubes up to stat_cap 10 (past it only when 1-2 short of the next upgrade threshold,
         since every cube also grows the hitbox), (c) supply drops about to land inside the zone."""
@@ -1153,8 +1182,8 @@ class Agent:
         if pref:
             src = ([(k, v[0], v[1]) for k, v in self.loot_mem.items()] if P["loot_mem"]
                    else [(p["id"], p["kind"], p["pos"]) for p in obs.get("pickups", [])])
-            for _, kind, q in src:
-                if kind in kinds or kind not in pref:
+            for pid, kind, q in src:
+                if (excluded_pickup is not None and pid == excluded_pickup) or kind in kinds or kind not in pref:
                     continue
                 if math.dist(q[:2], (x, y)) < P["loot_r"] and abs(q[2] - z) < 3.5:
                     out.append((q[0], q[1], pref[kind]))
