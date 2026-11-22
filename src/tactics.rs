@@ -133,18 +133,34 @@ impl Bot {
                 }
             } else if plan.state == State::Engage
                 && shot.is_none()
-                && obs.own.has("laser")
                 && !obs.own.has("gun")
                 && !obs.own.has("mortar")
                 && obs.t >= self.return_to_cover_until
             {
                 // The laser needs cover to start charging. If there is none nearby,
                 // the engagement goal keeps closing toward lightning range.
-                if let Some(target) = plan.target {
+                let laser = obs.own.weapons.iter().flatten().find(|w| w.kind == "laser");
+                if let (Some(target), Some(laser)) = (plan.target, laser) {
                     let (center, radius) = obs.zone.future(obs.t, 10.0);
-                    if let Some(cover) = self.cover(obs, &threats, center, radius * 0.97, false) {
-                        let eye = cover.up(obs.own.size(&self.cfg, "muzzle_height"));
-                        if (cover - obs.own.pos).norm() > 2.0 && !self.map.clear(eye, target.pos) {
+                    let muzzle_height = obs.own.size(&self.cfg, "muzzle_height");
+                    let mid_height = obs.own.size(&self.cfg, "height") * 0.5;
+                    let barrel = obs.own.size(&self.cfg, "radius") + 0.5;
+                    let range = laser.stat(&self.cfg, "range") + barrel;
+                    let can_charge = |pos: V3| {
+                        let muzzle = pos.up(muzzle_height);
+                        (target.pos - muzzle).norm() <= range
+                            && ballistics::laser_has_cover(
+                                &self.map,
+                                muzzle,
+                                barrel,
+                                pos.up(mid_height),
+                                target.pos,
+                            )
+                    };
+                    if let Some(cover) =
+                        self.cover(obs, &threats, center, radius * 0.97, false, can_charge)
+                    {
+                        if (cover - obs.own.pos).norm() > 2.0 {
                             goal = cover;
                         }
                     }
@@ -360,6 +376,7 @@ impl Bot {
         center: V2,
         radius: f64,
         roof: bool,
+        allowed: impl Fn(V3) -> bool,
     ) -> Option<V3> {
         let own = &obs.own;
         let eye = own.size(&self.cfg, "eye_height");
@@ -391,6 +408,9 @@ impl Bot {
                         continue;
                     }
                     let p = xy.z(z);
+                    if !allowed(p) {
+                        continue;
+                    }
                     let exposure: f64 = threats
                         .iter()
                         .take(4)
@@ -483,6 +503,7 @@ impl Bot {
                     zone.next_center,
                     zone.next_radius * 0.72,
                     false,
+                    |_| true,
                 )
                 .unwrap_or_else(|| self.ground_goal(anchor, obs));
             return Plan::new(State::Zone, goal, 100.0);
@@ -509,7 +530,9 @@ impl Bot {
                 )
             };
             let goal = self
-                .cover(obs, threats, soon_center, soon_radius * 0.94, false)
+                .cover(obs, threats, soon_center, soon_radius * 0.94, false, |_| {
+                    true
+                })
                 .unwrap_or(fallback);
             return Plan::new(State::Regen, goal, 91.0);
         }
@@ -643,9 +666,14 @@ impl Bot {
             && !sandwich
             && (best.score < 74.0 || self.state == State::Roof)
         {
-            if let Some(point) =
-                self.cover(obs, threats, zone.next_center, zone.next_radius * 0.9, true)
-            {
+            if let Some(point) = self.cover(
+                obs,
+                threats,
+                zone.next_center,
+                zone.next_radius * 0.9,
+                true,
+                |_| true,
+            ) {
                 best = choose(
                     best,
                     Plan::new(State::Roof, point, if squad { 72.0 } else { 64.0 }),
@@ -707,7 +735,11 @@ impl Bot {
             best = choose(best, plan);
         }
         if ffa && sandwich && best.state != State::Drop {
-            if let Some(cover) = self.cover(obs, threats, safe_center, safe_radius * 0.94, false) {
+            if let Some(cover) =
+                self.cover(obs, threats, safe_center, safe_radius * 0.94, false, |_| {
+                    true
+                })
+            {
                 best = Plan::new(State::Farm, cover, 86.0);
             }
         }

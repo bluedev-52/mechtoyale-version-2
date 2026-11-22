@@ -86,6 +86,14 @@ fn aligned(actual: V3, desired: V3, radius: f64, distance: f64) -> bool {
     actual.dot(desired) > (radius / distance.max(0.1)).atan().cos()
 }
 
+fn laser_visible(map: &Arena, muzzle: V3, barrel: f64, target: V3) -> bool {
+    map.clear(muzzle + (target - muzzle).unit() * barrel, target)
+}
+
+pub fn laser_has_cover(map: &Arena, muzzle: V3, barrel: f64, midpoint: V3, target: V3) -> bool {
+    !laser_visible(map, muzzle, barrel, target) && !map.clear(target, midpoint)
+}
+
 pub fn solve(
     slot: usize,
     weapon: &Weapon,
@@ -212,7 +220,6 @@ pub fn solve(
         }
         "laser" if distance <= range + barrel && (ready || weapon.charge() > 0.0) => {
             let desired = offset.unit();
-            let visible = map.clear(muzzle + desired * barrel, target.pos);
             let charge = weapon.charge();
             let full = stat("charge").max(0.01);
             let min = stat("min_charge");
@@ -225,19 +232,22 @@ pub fn solve(
                 * cookoff
                 * (stat("min_frac") + (1.0 - stat("min_frac")) * (charge / full).min(1.0));
             let lethal = target.hp.is_some_and(|hp| estimated >= hp);
-            let release = visible
+            let midpoint = own.pos.up(dim("height") * 0.5);
+            if charge <= 0.0
+                && !lethal
+                && !laser_has_cover(map, muzzle, barrel, midpoint, target.pos)
+            {
+                return None;
+            }
+            let release = charge >= min
+                && laser_visible(map, muzzle, barrel, target.pos)
                 && barrel_clear
                 && aligned(actual, desired, target.radius * 0.9, distance)
                 && map.clear(
                     start,
                     start + actual * (target.pos - start).dot(actual).max(0.0),
                 )
-                && charge >= min
                 && (charge >= full.min(0.65) || lethal);
-            let covered = !visible && !map.clear(target.pos, own.pos.up(dim("height") * 0.5));
-            if charge <= 0.0 && !covered && !lethal {
-                return None;
-            }
             Some(Shot {
                 slot,
                 target: target.pos,
@@ -280,6 +290,20 @@ pub fn solve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn laser_cover_must_hide_the_mech_midpoint() {
+        let map =
+            Arena::load(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("arena")).unwrap();
+        let muzzle = V3(16.0, 230.0, 7.2);
+        let midpoint = V3(16.0, 230.0, 4.7);
+        let target = V3(34.0, 230.0, 14.0);
+        assert!(!laser_visible(&map, muzzle, 3.0, target));
+        assert!(map.clear(target, midpoint));
+        assert!(!laser_has_cover(&map, muzzle, 3.0, midpoint, target));
+        assert!(laser_has_cover(&map, muzzle, 3.0, midpoint, target.up(6.0)));
+    }
+
     #[test]
     fn gun_interception_closes_the_distance() {
         let offset = V3(110.0, 25.0, -8.0);
