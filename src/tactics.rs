@@ -131,6 +131,24 @@ impl Bot {
                         }
                     }
                 }
+            } else if plan.state == State::Engage
+                && shot.is_none()
+                && obs.own.has("laser")
+                && !obs.own.has("gun")
+                && !obs.own.has("mortar")
+                && obs.t >= self.return_to_cover_until
+            {
+                // The laser needs cover to start charging. If there is none nearby,
+                // the engagement goal keeps closing toward lightning range.
+                if let Some(target) = plan.target {
+                    let (center, radius) = obs.zone.future(obs.t, 10.0);
+                    if let Some(cover) = self.cover(obs, &threats, center, radius * 0.97, false) {
+                        let eye = cover.up(obs.own.size(&self.cfg, "muzzle_height"));
+                        if (cover - obs.own.pos).norm() > 2.0 && !self.map.clear(eye, target.pos) {
+                            goal = cover;
+                        }
+                    }
+                }
             }
         }
         let avoid = !peeking && (defensive || self.world.mode == Mode::Ffa);
@@ -655,9 +673,12 @@ impl Bot {
             } else {
                 48.0
             };
-            let optimal = if own.has("lightning") && (track.has("laser") || obs.zone.radius <= 65.0)
+            let lightning = own.weapons.iter().flatten().find(|w| w.kind == "lightning");
+            let no_ranged_fallback = threat.clear && !own.has("gun") && !own.has("mortar");
+            let optimal = if let Some(lightning) = lightning
+                .filter(|_| track.has("laser") || obs.zone.radius <= 65.0 || no_ranged_fallback)
             {
-                self.cfg.weapon("lightning", "range") * 0.76
+                lightning.stat(&self.cfg, "range") * 0.76
             } else if own.has("laser") || own.has("mortar") {
                 105.0
             } else {
