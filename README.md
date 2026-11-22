@@ -1,6 +1,8 @@
 # Mechtoyale V2
 
-Bot de torneo en Rust para `mechfight/1`. Detecta señales de Practice y FFA en cada partida. Busca duelos aislados en Practice y prioriza cubos, rotaciones y remates oportunistas en FFA.
+El Dockerfile principal ejecuta **B2-c**, la variante Python de `mechfight/1` preparada para el tester oficial. Su código en `b2c/` proviene de [la revisión validada `94bc7b7`](https://github.com/bluedev-52/mech-royale-bot-test/commit/94bc7b7a9df238f306df63907773a8aec0cca7ee).
+
+El bot Rust de Mechtoyale V2 sigue disponible con `docker build --target rust --platform linux/amd64 -t mechtoyale:rust .`. Detecta señales de Practice y FFA en cada partida. Busca duelos aislados en Practice y prioriza cubos, rotaciones y remates oportunistas en FFA.
 
 El protocolo y las reglas oficiales están en [protocol.md](protocol.md). El mapa, el checker y los ejemplos de Python y TypeScript provienen del [kit oficial](mechfight-kit.md).
 
@@ -19,6 +21,6 @@ python3 check/check.py --map-dir /arena -- \
 python3 scripts/bench_latency.py
 ```
 
-El benchmark usa 15 mechs, 40 proyectiles y 30 sonidos por observación. También comprueba la respuesta al tick más reciente de una ráfaga de 10 observaciones y el cese de fuego durante la regeneración. Activa `--debug` para validar el modo `DEBUG_DRAW=1`.
+El benchmark del bot Rust usa 15 mechs, 40 proyectiles y 30 sonidos por observación. También comprueba la respuesta al tick más reciente de una ráfaga de 10 observaciones y el cese de fuego durante la regeneración. Activa `--debug` para validar el modo `DEBUG_DRAW=1`.
 
 El checker reproduce observaciones grabadas. Las puntuaciones y la clasificación se miden al enviar un repositorio público a la pista de Mech Royale.
