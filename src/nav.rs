@@ -119,30 +119,16 @@ fn standing_clear(map: &Arena, a: V3, b: V3, m: &Mobility) -> bool {
 }
 
 fn walkable_rise(map: &Arena, a: V3, b: V3, m: &Mobility) -> bool {
-    if b.2 - a.2 <= m.step {
-        return true;
+    if (map.ground(a.xy()) - a.2).abs() <= 0.15 && (map.ground(b.xy()) - b.2).abs() <= 0.15 {
+        return map.ground_slope_walkable(a.xy(), b.xy(), m.slope);
     }
-    if (map.ground(a.xy()) - a.2).abs() > 0.15 || (map.ground(b.xy()) - b.2).abs() > 0.15 {
-        return false;
-    }
-    let delta = b.xy() - a.xy();
-    let length = delta.norm();
-    let samples = length.ceil().max(1.0) as usize;
-    let max_rise = m.slope * length / samples as f64;
-    let mut previous = a.2;
-    for i in 1..=samples {
-        let ground = map.ground(a.xy() + delta * (i as f64 / samples as f64));
-        if ground - previous > max_rise {
-            return false;
-        }
-        previous = ground;
-    }
-    true
+    b.2 - a.2 <= m.step
 }
 
 fn passable(map: &Arena, a: V3, b: V3, m: &Mobility) -> Option<f64> {
     let rise = b.2 - a.2;
     if !walkable_rise(map, a, b, m) {
+        let rise = rise.max(0.0);
         let energy = m.climb_cost(rise + 0.4);
         return (rise <= 55.0
             && energy + 15.0 <= m.energy
@@ -360,10 +346,11 @@ impl Navigator {
             jump: false,
         };
         let rise = waypoint.2 - pos.2;
-        let floor = map.floor_below(pos);
-        if ((!walkable_rise(map, pos, waypoint, &m) || self.climbing && rise > -0.4)
-            && delta.norm() < 10.0)
-            && (self.climbing || m.climb_cost(waypoint.2 - floor + 0.4) + 15.0 <= m.energy)
+        if delta.norm() < 10.0
+            && (!walkable_rise(map, pos, waypoint, &m) || self.climbing && rise > -0.4)
+            && (self.climbing
+                || m.climb_cost((waypoint.2 - map.floor_below(pos)).max(0.0) + 0.4) + 15.0
+                    <= m.energy)
         {
             movement.jump = own.grounded;
             movement.boost = true;
@@ -533,6 +520,18 @@ mod tests {
         assert_eq!(passable(&map, a, b, &m), Some(0.0));
         assert!(direct_walk(&map, a, b, &m));
         assert_eq!(passable(&map, a, b.up(10.0), &m), None);
+
+        let a = V2(-263.5, 16.0);
+        let b = V2(-260.5, 16.0);
+        let (a, b) = (a.z(map.ground(a)), b.z(map.ground(b)));
+        // The 1 m samples straddle a 1.53 m rise and average under the slope limit.
+        assert!(b.2 - a.2 > m.step);
+        assert!((0..3).all(|i| {
+            let p = a.xy() + V2(f64::from(i), 0.0);
+            map.ground(p + V2(1.0, 0.0)) - map.ground(p) < m.slope
+        }));
+        assert!(!walkable_rise(&map, a, b, &m));
+        assert_eq!(passable(&map, a, b, &m), None);
     }
 
     #[test]

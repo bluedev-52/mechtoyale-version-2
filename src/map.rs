@@ -244,6 +244,52 @@ impl Arena {
             + (sample(i, j + 1) * (1.0 - u) + sample(i + 1, j + 1) * u) * v
     }
 
+    pub fn ground_slope_walkable(&self, a: V2, b: V2, max_slope: f64) -> bool {
+        let delta = b - a;
+        let length = delta.norm();
+        if length < 1e-8 {
+            return true;
+        }
+        let t = &self.terrain;
+        let crossings = |p: f64, d: f64, origin: f64| {
+            if d == 0.0 {
+                return (f64::INFINITY, f64::INFINITY);
+            }
+            let cell = (p - origin) / t.step;
+            let edge = if d > 0.0 {
+                cell.floor() + 1.0
+            } else {
+                cell.ceil() - 1.0
+            };
+            ((edge - cell) * t.step / d, t.step / d.abs())
+        };
+        let (mut tx, dx) = crossings(a.0, delta.0, t.min_x);
+        let (mut ty, dy) = crossings(a.1, delta.1, t.min_y);
+        let mut start = 0.0;
+        let mut z0 = self.ground(a);
+        while start < 1.0 {
+            let end = tx.min(ty).min(1.0);
+            let middle_rise = self.ground(a + delta * ((start + end) * 0.5)) - z0;
+            let z1 = self.ground(a + delta * end);
+            let rise = z1 - z0;
+            // Within a bilinear cell the height along this segment is quadratic.
+            // Its steepest uphill grade occurs at one of the two endpoints.
+            let max_rise = (4.0 * middle_rise - rise).max(3.0 * rise - 4.0 * middle_rise);
+            if max_rise > max_slope * length * (end - start) + 1e-8 {
+                return false;
+            }
+            if tx <= end {
+                tx += dx;
+            }
+            if ty <= end {
+                ty += dy;
+            }
+            start = end;
+            z0 = z1;
+        }
+        true
+    }
+
     fn candidates(&self, key: Cell) -> impl Iterator<Item = &Prism> {
         self.hash
             .get(&key)
