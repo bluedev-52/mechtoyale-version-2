@@ -17,6 +17,7 @@ switched when another one beats the current by 10%.
 """
 from __future__ import annotations
 
+from collections import deque
 import json
 import math
 import os
@@ -241,6 +242,7 @@ class Agent:
         self.offense = self.P.get("style") == "offense"
         self.crates: List[dict] = []
         self.rear_hits: List[Tuple[float, float, Optional[int]]] = []
+        self.armor_hits = deque()
         self.flip = 1.0
         self.flip_t = 0.0
         self.loot_mem: Dict[int, Tuple[str, Tuple[float, float, float], float]] = {}
@@ -289,6 +291,9 @@ class Agent:
             self.route_guard.previous = move
         boost, jump = self.movement_budget(move, boost, jump, locks, incoming)
         aim, fire = self.plan_aim_fire(locks, target)
+        armor_yaw = self.guard_yaw(aim[0], fire)
+        if armor_yaw is not None:
+            aim = [armor_yaw, aim[1]]
         a.update(self.plan_take(obs, target))
         # proactive reload only with <= 4 rounds and nobody close (reload is heard at 60 m)
         gun = next((w for w in me["weapons"] if w and w["kind"] == "gun"), None)
@@ -304,6 +309,8 @@ class Agent:
             a.setdefault("debug", {})["route_w"] = self.route_probe.applied
         if self.suspended_pickup is not None and os.environ.get("MECH_LOCAL_METRICS") == "1":
             a.setdefault("debug", {})["suspended_pickup_w"] = self.suspended_pickup
+        if armor_yaw is not None and os.environ.get("MECH_LOCAL_METRICS") == "1":
+            a.setdefault("debug", {})["armor_yaw_z"] = round(armor_yaw, 4)
         return a
 
     def movement_budget(self, move, boost, jump, locks, incoming):
@@ -442,6 +449,8 @@ class Agent:
     # ================================================================== threats
     def update_threats(self, obs: dict) -> None:
         t = self.t
+        while self.armor_hits and self.armor_hits[0][0] < t - 1.2:
+            self.armor_hits.popleft()
         vis = {}
         for m in obs["mechs"]:
             npc = m.get("kind") != "mech"
@@ -478,6 +487,9 @@ class Agent:
                 by = e.get("by")
                 if by is not None:
                     self.attackers[by] = t
+                    if 0 <= by < self.cfg["match"]["mechs"] and by != self.me["id"] and e.get("bearing") is not None:
+                        rear_mult = self.me["stats"].get("rear_mult", self.mech.get("rear_mult", 1.0)) if e.get("rear") else 1.0
+                        self.armor_hits.append((t, by, e["bearing"], e["amount"] / rear_mult))
                 if by is not None and by not in vis and e.get("bearing") is not None:
                     th = self.threats.get(by)
                     if th is None or t - th.seen > 1.0:
@@ -1248,6 +1260,31 @@ class Agent:
         return {"take": best[1], "drop": slot}
 
     # ================================================================== aim / fire
+    def guard_yaw(self, planned, fire):
+        """Turn the front arc toward recent attackers while the weapons are idle."""
+        hits = self.armor_hits
+        if len(hits) < 2 or any(fire) or len({by for _, by, _, _ in hits}) < 2:
+            return None
+        if any(w and w.get("charge", 0) > 0 for w in self.me["weapons"]):
+            return None
+        arc = self.me["stats"].get("front_arc_deg", self.mech.get("front_arc_deg"))
+        if arc is None:
+            return None
+        half_arc = math.radians(arc) / 2
+
+        def protected(yaw):
+            return sum(amount for _, _, bearing, amount in hits
+                       if abs(wrap(bearing - yaw)) <= half_arc)
+
+        # The weighted middle can cover two attackers that straddle the desired heading.
+        mean = math.atan2(sum(amount * math.sin(bearing) for _, _, bearing, amount in hits),
+                          sum(amount * math.cos(bearing) for _, _, bearing, amount in hits))
+        headings = [self.me["aim"][0], mean, *(bearing for _, _, bearing, _ in hits)]
+        best = max(headings, key=lambda yaw: (protected(yaw), -abs(wrap(yaw - planned))))
+        if protected(best) > protected(planned):
+            return best
+        return None
+
     def plan_aim_fire(self, locks, target):
         me = self.me
         x, y, z = self.pos
