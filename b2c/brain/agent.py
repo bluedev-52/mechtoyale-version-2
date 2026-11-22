@@ -31,6 +31,7 @@ from brain.crossfire import Crossfire
 from brain.nav import NavField, NavGrid
 from brain.world import World
 from brain.route_probe import RouteProbe
+from brain.route_guard import WeaponRouteGuard
 
 # Practice-squad variant of the document's weight table (sum of magnitudes = 100 per phase).
 PHASE_W = {
@@ -244,6 +245,8 @@ class Agent:
         self.flip_t = 0.0
         self.loot_mem: Dict[int, Tuple[str, Tuple[float, float, float], float]] = {}
         self.route_probe = RouteProbe.from_env()
+        self.route_guard = WeaponRouteGuard() if self.route_probe is None else None
+        self.suspended_pickup = None
         self.commit_dir: Optional[Tuple[float, float]] = None
         self.commit_until = -1.0
         self.crossfire = Crossfire(self.cfg)
@@ -277,10 +280,13 @@ class Agent:
         self.update_threats(obs)
         self.crossfire.observe(obs)
         self.mode = self.phase()
+        self.suspended_pickup = None
         locks = self.laser_locks(obs)
         incoming = self.incoming(obs)
         target = self.select_target()
         move, boost, jump = self.plan_move(obs, locks, incoming, target)
+        if self.route_guard is not None:
+            self.route_guard.previous = move
         boost, jump = self.movement_budget(move, boost, jump, locks, incoming)
         aim, fire = self.plan_aim_fire(locks, target)
         a.update(self.plan_take(obs, target))
@@ -296,6 +302,8 @@ class Agent:
             a["debug"] = {"crossfire": self.crossfire.sample}
         if self.route_probe and self.route_probe.applied:
             a.setdefault("debug", {})["route_w"] = self.route_probe.applied
+        if self.suspended_pickup is not None and os.environ.get("MECH_LOCAL_METRICS") == "1":
+            a.setdefault("debug", {})["suspended_pickup_w"] = self.suspended_pickup
         return a
 
     def movement_budget(self, move, boost, jump, locks, incoming):
@@ -790,6 +798,11 @@ class Agent:
         self.grab_pt = None
         route = self.route_probe
         blocked_pickup = None
+        if self.route_guard is not None:
+            route_kinds = [w["kind"] if w else None for w in me["weapons"]]
+            blocked_pickup = self.route_guard.update(obs=obs, agent=self,
+                                                     wanted=self.weapon_pref(route_kinds).keys() - set(route_kinds))
+            self.suspended_pickup = blocked_pickup
         if route is not None:
             route_kinds = [w["kind"] if w else None for w in me["weapons"]]
             route.observe(obs, self.weapon_pref(route_kinds).keys() - set(route_kinds))
